@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.14)
+
+project(rabitq_testqg CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(OpenMP)
+
+set(RABITQ_TEST_INCLUDES
+    ${CMAKE_CURRENT_LIST_DIR}/../include
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+
+add_executable(testqg testqg.cpp)
+target_include_directories(testqg PRIVATE ${RABITQ_TEST_INCLUDES})
+target_compile_options(testqg PRIVATE -mavx2 -mfma -mavx512f -mavx512dq -mavx512bw -mavx512vl)
+if (OpenMP_CXX_FOUND)
+  target_link_libraries(testqg PRIVATE OpenMP::OpenMP_CXX)
+endif()
