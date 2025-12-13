@@ -53,9 +53,19 @@ namespace rabitqlib::symqg
         RotatorType rotator_type_ = RotatorType::FhtKacRotator;
 
         // Memory-mapped storage for: vectors + graph + quantization codes + factors
-        char *data_ptr_ = nullptr;      // mapped data base pointer
-        size_t data_len_ = 0;           // mapped data length in bytes
-        int data_fd_ = -1;              // file descriptor for mapped data
+        char *data_ptr_ = nullptr;       // mapped data base pointer
+        size_t data_len_ = 0;            // mapped data length in bytes
+        int data_fd_ = -1;               // file descriptor for mapped data
+        bool data_mmap_ = false;         // whether data_ptr_ comes from mmap
+        bool data_malloc_owned_ = false; // whether data_ptr_ was malloc'ed (non-Array fallback)
+        Array<
+            char,
+            std::vector<size_t>,
+            memory::AlignedAllocator<
+                char,
+                1 << 22,
+                true>>
+            data_;                      // owned storage when not using mmap
         Rotator<T> *rotator_ = nullptr; // data rotator
         std::unique_ptr<VisitedListPool> visited_list_pool_ = nullptr;
 
@@ -180,16 +190,28 @@ namespace rabitqlib::symqg
         if (data_ptr_ != nullptr)
         {
 #ifdef __linux__
-            munmap(data_ptr_, data_len_);
+            if (data_mmap_)
+            {
+                munmap(data_ptr_, data_len_);
+                if (data_fd_ != -1)
+                {
+                    close(data_fd_);
+                }
+            }
+            else if (data_malloc_owned_)
+            {
+                ::free(data_ptr_);
+            }
+#else
+            if (data_malloc_owned_)
+            {
+                ::free(data_ptr_);
+            }
 #endif
             data_ptr_ = nullptr;
-        }
-        if (data_fd_ != -1)
-        {
-#ifdef __linux__
-            close(data_fd_);
-#endif
             data_fd_ = -1;
+            data_mmap_ = false;
+            data_malloc_owned_ = false;
         }
     }
 
@@ -300,6 +322,7 @@ namespace rabitqlib::symqg
 
         raw_dist_func_ = (metric_type_ == METRIC_IP) ? dot_product_dis<T> : euclidean_sqr<T>;
 
+        data_mmap_ = true;
         initialize();
 
 /* Data via mmap */
@@ -330,6 +353,8 @@ namespace rabitqlib::symqg
             exit(1);
         }
         data_ptr_ = reinterpret_cast<char *>(mapped);
+        data_mmap_ = true;
+        data_malloc_owned_ = false;
 #else
         // Fallback: read into heap buffer if not on Linux
         std::ifstream data_input(data_filename, std::ios::binary);
@@ -344,6 +369,8 @@ namespace rabitqlib::symqg
         }
         data_input.read(data_ptr_, static_cast<std::streamsize>(total_bytes));
         data_input.close();
+        data_mmap_ = false;
+        data_malloc_owned_ = true;
 #endif
 
         /* Rotator */
@@ -537,8 +564,19 @@ namespace rabitqlib::symqg
             QGBatchDataMap<T>::data_bytes(padded_dim_) * (degree_bound_ / fastscan::kBatchSize);
         this->row_offset_ = neighbor_offset_ + degree_bound_ * sizeof(PID);
 
-        // Data is provided externally (copy or mmap). No allocation here.
-        // data_ptr_ should point to a buffer of size num_points_ * row_offset_.
+        // When not using mmap, allocate owned storage and set data_ptr_ accordingly.
+        data_ptr_ = nullptr;
+        data_len_ = 0;
+        data_fd_ = -1;
+        data_malloc_owned_ = false;
+
+        if (!data_mmap_)
+        {
+            data_ = Array<char, std::vector<size_t>, memory::AlignedAllocator<char, 1 << 22, true>>(
+                std::vector<size_t>{num_points_, row_offset_});
+            data_ptr_ = data_.data();
+            data_len_ = num_points_ * row_offset_;
+        }
 
         visited_list_pool_ = std::make_unique<VisitedListPool>(1, num_points_);
     }
