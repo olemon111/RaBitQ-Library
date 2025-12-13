@@ -45,3 +45,7 @@ data/
 
 build-test/
 output/
+python/dist/
+python/qg.egg-info/
+python/qg/__pycache__/
+python/qg/_qg_core*.so

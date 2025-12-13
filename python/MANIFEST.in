@@ -1,0 +1,6 @@
+include README.md
+include pyproject.toml
+recursive-include qg *.py
+# Include header files - they should be in the parent directory when building from source
+# When building from sdist, we'll use environment variable or fallback paths
+
