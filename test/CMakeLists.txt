@@ -18,3 +18,17 @@ target_compile_options(testqg PRIVATE -mavx2 -mfma -mavx512f -mavx512dq -mavx512
 if (OpenMP_CXX_FOUND)
   target_link_libraries(testqg PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+add_executable(saveqg saveqg.cpp)
+target_include_directories(saveqg PRIVATE ${RABITQ_TEST_INCLUDES})
+target_compile_options(saveqg PRIVATE -mavx2 -mfma -mavx512f -mavx512dq -mavx512bw -mavx512vl)
+if (OpenMP_CXX_FOUND)
+  target_link_libraries(saveqg PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+add_executable(load_test_qg load_test_qg.cpp)
+target_include_directories(load_test_qg PRIVATE ${RABITQ_TEST_INCLUDES})
+target_compile_options(load_test_qg PRIVATE -mavx2 -mfma -mavx512f -mavx512dq -mavx512bw -mavx512vl)
+if (OpenMP_CXX_FOUND)
+  target_link_libraries(load_test_qg PRIVATE OpenMP::OpenMP_CXX)
+endif()

@@ -12,6 +12,13 @@
 #include <ostream>
 #include <vector>
 
+#ifdef __linux__
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "rabitqlib/defines.hpp"
 #include "rabitqlib/fastscan/fastscan.hpp"
 #include "rabitqlib/index/estimator.hpp"
@@ -45,14 +52,10 @@ namespace rabitqlib::symqg
         MetricType metric_type_ = MetricType::METRIC_L2;
         RotatorType rotator_type_ = RotatorType::FhtKacRotator;
 
-        Array<
-            char,
-            std::vector<size_t>,
-            memory::AlignedAllocator<
-                char,
-                1 << 22,
-                true>>
-            data_;                      // vectors + graph + quantization codes + factors
+        // Memory-mapped storage for: vectors + graph + quantization codes + factors
+        char *data_ptr_ = nullptr;      // mapped data base pointer
+        size_t data_len_ = 0;           // mapped data length in bytes
+        int data_fd_ = -1;              // file descriptor for mapped data
         Rotator<T> *rotator_ = nullptr; // data rotator
         std::unique_ptr<VisitedListPool> visited_list_pool_ = nullptr;
 
@@ -70,34 +73,34 @@ namespace rabitqlib::symqg
 
         [[nodiscard]] T *get_vector(PID data_id)
         {
-            return reinterpret_cast<T *>(&data_.at(row_offset_ * data_id));
+            return reinterpret_cast<T *>(data_ptr_ + (row_offset_ * data_id));
         }
 
         [[nodiscard]] const T *get_vector(PID data_id) const
         {
-            return reinterpret_cast<const T *>(&data_.at(row_offset_ * data_id));
+            return reinterpret_cast<const T *>(data_ptr_ + (row_offset_ * data_id));
         }
 
         [[nodiscard]] char *get_batch_data(PID data_id)
         {
-            return &data_.at((row_offset_ * data_id) + batch_data_offset_);
+            return data_ptr_ + ((row_offset_ * data_id) + batch_data_offset_);
         }
 
         [[nodiscard]] const char *get_batch_data(PID data_id) const
         {
-            return &data_.at((row_offset_ * data_id) + batch_data_offset_);
+            return data_ptr_ + ((row_offset_ * data_id) + batch_data_offset_);
         }
 
         [[nodiscard]] PID *get_neighbors(PID data_id)
         {
             return reinterpret_cast<PID *>(
-                &data_.at((row_offset_ * data_id) + neighbor_offset_));
+                data_ptr_ + ((row_offset_ * data_id) + neighbor_offset_));
         }
 
         [[nodiscard]] const PID *get_neighbors(PID data_id) const
         {
             return reinterpret_cast<const PID *>(
-                &data_.at((row_offset_ * data_id) + neighbor_offset_));
+                data_ptr_ + ((row_offset_ * data_id) + neighbor_offset_));
         }
 
         void find_candidates(
@@ -141,11 +144,15 @@ namespace rabitqlib::symqg
 
         void set_ep(PID entry) { this->entry_point_ = entry; };
 
-        void save(const char *) const;
+        // void save(const char *) const;
 
-        void load(const char *);
+        // void load(const char *);
 
         void set_ef(size_t);
+
+        // Save/Load index split into metadata + data parts
+        void save_index(const char *meta_filename, const char *data_filename) const;
+        void load_index(const char *meta_filename, const char *data_filename);
 
         // Public helpers for external construction (used by samples/tests)
         void copy_vectors_public(const T *data) { copy_vectors(data); }
@@ -170,6 +177,20 @@ namespace rabitqlib::symqg
     inline QuantizedGraph<T>::~QuantizedGraph()
     {
         ::delete this->rotator_;
+        if (data_ptr_ != nullptr)
+        {
+#ifdef __linux__
+            munmap(data_ptr_, data_len_);
+#endif
+            data_ptr_ = nullptr;
+        }
+        if (data_fd_ != -1)
+        {
+#ifdef __linux__
+            close(data_fd_);
+#endif
+            data_fd_ = -1;
+        }
     }
 
     template <typename T>
@@ -186,73 +207,199 @@ namespace rabitqlib::symqg
     }
 
     template <typename T>
-    inline void QuantizedGraph<T>::save(const char *filename) const
+    void QuantizedGraph<T>::save_index(const char *meta_filename, const char *data_filename) const
     {
-        std::cout << "Saving quantized graph to " << filename << '\n';
-        std::ofstream output(filename, std::ios::binary);
-        assert(output.is_open());
+        std::cout << "Saving quantized graph to " << meta_filename << " and " << data_filename << '\n';
+        std::ofstream meta_output(meta_filename, std::ios::binary);
+        std::ofstream data_output(data_filename, std::ios::binary);
+        assert(meta_output.is_open());
+        assert(data_output.is_open());
 
         /* Basic variants */
-        output.write(reinterpret_cast<const char *>(&num_points_), sizeof(size_t));
-        output.write(reinterpret_cast<const char *>(&degree_bound_), sizeof(size_t));
-        output.write(reinterpret_cast<const char *>(&dim_), sizeof(size_t));
-        output.write(reinterpret_cast<const char *>(&padded_dim_), sizeof(size_t));
-        output.write(reinterpret_cast<const char *>(&entry_point_), sizeof(PID));
-        output.write(reinterpret_cast<const char *>(&rotator_type_), sizeof(RotatorType));
-        output.write(reinterpret_cast<const char *>(&metric_type_), sizeof(MetricType));
+        meta_output.write(reinterpret_cast<const char *>(&num_points_), sizeof(size_t));
+        meta_output.write(reinterpret_cast<const char *>(&degree_bound_), sizeof(size_t));
+        meta_output.write(reinterpret_cast<const char *>(&dim_), sizeof(size_t));
+        meta_output.write(reinterpret_cast<const char *>(&padded_dim_), sizeof(size_t));
+        meta_output.write(reinterpret_cast<const char *>(&entry_point_), sizeof(PID));
+        meta_output.write(reinterpret_cast<const char *>(&rotator_type_), sizeof(RotatorType));
+        meta_output.write(reinterpret_cast<const char *>(&metric_type_), sizeof(MetricType));
 
-        /* Data */
-        data_.save(output);
+        /* Data: contiguous block of num_points_ * row_offset_ bytes */
+        if (data_ptr_ == nullptr)
+        {
+            std::cerr << "Data pointer is null in save_index" << '\n';
+            exit(1);
+        }
+        const size_t total_bytes = num_points_ * row_offset_;
+        data_output.write(data_ptr_, static_cast<std::streamsize>(total_bytes));
 
         /* Rotator */
-        this->rotator_->save(output);
+        this->rotator_->save(meta_output);
 
-        output.close();
-        std::cout << "\tQuantized graph saved!\n";
+        meta_output.close();
+        data_output.close();
+        std::cout << "\tQuantized graph saved to " << meta_filename << " and " << data_filename << '\n';
     }
 
+    // template <typename T>
+    // inline void QuantizedGraph<T>::save(const char *filename) const
+    // {
+    //     std::cout << "Saving quantized graph to " << filename << '\n';
+    //     std::ofstream output(filename, std::ios::binary);
+    //     assert(output.is_open());
+
+    //     /* Basic variants */
+    //     output.write(reinterpret_cast<const char *>(&num_points_), sizeof(size_t));
+    //     output.write(reinterpret_cast<const char *>(&degree_bound_), sizeof(size_t));
+    //     output.write(reinterpret_cast<const char *>(&dim_), sizeof(size_t));
+    //     output.write(reinterpret_cast<const char *>(&padded_dim_), sizeof(size_t));
+    //     output.write(reinterpret_cast<const char *>(&entry_point_), sizeof(PID));
+    //     output.write(reinterpret_cast<const char *>(&rotator_type_), sizeof(RotatorType));
+    //     output.write(reinterpret_cast<const char *>(&metric_type_), sizeof(MetricType));
+
+    //     /* Data: contiguous block of num_points_ * row_offset_ bytes */
+    //     if (data_ptr_ == nullptr)
+    //     {
+    //         std::cerr << "Data pointer is null in save" << '\n';
+    //         exit(1);
+    //     }
+    //     const size_t total_bytes = num_points_ * row_offset_;
+    //     output.write(data_ptr_, static_cast<std::streamsize>(total_bytes));
+
+    //     /* Rotator */
+    //     this->rotator_->save(output);
+
+    //     output.close();
+    //     std::cout << "\tQuantized graph saved!\n";
+    // }
+
     template <typename T>
-    inline void QuantizedGraph<T>::load(const char *filename)
+    void QuantizedGraph<T>::load_index(const char *meta_filename, const char *data_filename)
     {
-        std::cout << "loading quantized graph " << filename << '\n';
+        std::cout << "loading quantized graph with meta " << meta_filename << " and data " << data_filename << '\n';
 
         /* Check existence */
-        if (!file_exists(filename))
+        if (!file_exists(meta_filename) || !file_exists(data_filename))
         {
             std::cerr << "Index does not exist!\n";
             exit(1);
         }
 
-        std::ifstream input(filename, std::ios::binary);
-        assert(input.is_open());
+        std::ifstream meta_input(meta_filename, std::ios::binary);
+        assert(meta_input.is_open());
+        // data file will be memory-mapped on Linux
 
         /* Basic variants */
-        input.read(reinterpret_cast<char *>(&num_points_), sizeof(size_t));
-        input.read(reinterpret_cast<char *>(&degree_bound_), sizeof(size_t));
-        input.read(reinterpret_cast<char *>(&dim_), sizeof(size_t));
-        input.read(reinterpret_cast<char *>(&padded_dim_), sizeof(size_t));
-        input.read(reinterpret_cast<char *>(&entry_point_), sizeof(PID));
-        input.read(reinterpret_cast<char *>(&rotator_type_), sizeof(RotatorType));
-        input.read(reinterpret_cast<char *>(&metric_type_), sizeof(MetricType));
+        meta_input.read(reinterpret_cast<char *>(&num_points_), sizeof(size_t));
+        meta_input.read(reinterpret_cast<char *>(&degree_bound_), sizeof(size_t));
+        meta_input.read(reinterpret_cast<char *>(&dim_), sizeof(size_t));
+        meta_input.read(reinterpret_cast<char *>(&padded_dim_), sizeof(size_t));
+        meta_input.read(reinterpret_cast<char *>(&entry_point_), sizeof(PID));
+        meta_input.read(reinterpret_cast<char *>(&rotator_type_), sizeof(RotatorType));
+        meta_input.read(reinterpret_cast<char *>(&metric_type_), sizeof(MetricType));
 
         raw_dist_func_ = (metric_type_ == METRIC_IP) ? dot_product_dis<T> : euclidean_sqr<T>;
 
         initialize();
 
-        /* Data */
-        data_.load(input);
+/* Data via mmap */
+#ifdef __linux__
+        data_fd_ = ::open(data_filename, O_RDONLY);
+        if (data_fd_ == -1)
+        {
+            std::perror("open data file failed");
+            exit(1);
+        }
+        struct stat st;
+        if (fstat(data_fd_, &st) != 0)
+        {
+            std::perror("fstat data file failed");
+            exit(1);
+        }
+        data_len_ = static_cast<size_t>(st.st_size);
+        const size_t expected = num_points_ * row_offset_;
+        if (data_len_ < expected)
+        {
+            std::cerr << "Data file size " << data_len_ << " is smaller than expected " << expected << '\n';
+            exit(1);
+        }
+        void *mapped = mmap(nullptr, data_len_, PROT_READ, MAP_PRIVATE, data_fd_, 0);
+        if (mapped == MAP_FAILED)
+        {
+            std::perror("mmap failed");
+            exit(1);
+        }
+        data_ptr_ = reinterpret_cast<char *>(mapped);
+#else
+        // Fallback: read into heap buffer if not on Linux
+        std::ifstream data_input(data_filename, std::ios::binary);
+        assert(data_input.is_open());
+        const size_t total_bytes = num_points_ * row_offset_;
+        data_len_ = total_bytes;
+        data_ptr_ = static_cast<char *>(::malloc(total_bytes));
+        if (!data_ptr_)
+        {
+            std::cerr << "malloc failed for data buffer" << '\n';
+            exit(1);
+        }
+        data_input.read(data_ptr_, static_cast<std::streamsize>(total_bytes));
+        data_input.close();
+#endif
 
         /* Rotator */
-        this->rotator_->load(input);
+        this->rotator_->load(meta_input);
         if (rotator_->size() != padded_dim_)
         {
             std::cerr << "Bad padded_dim_ for rotator in QuantizedGraph<T>.load()\n";
             exit(1);
         }
 
-        input.close();
-        std::cout << "Quantized graph loaded!\n";
+        meta_input.close();
+        std::cout << "Quantized graph loaded from " << meta_filename << " and " << data_filename << '\n';
     }
+
+    // template <typename T>
+    // inline void QuantizedGraph<T>::load(const char *filename)
+    // {
+    //     std::cout << "loading quantized graph " << filename << '\n';
+
+    //     /* Check existence */
+    //     if (!file_exists(filename))
+    //     {
+    //         std::cerr << "Index does not exist!\n";
+    //         exit(1);
+    //     }
+
+    //     std::ifstream input(filename, std::ios::binary);
+    //     assert(input.is_open());
+
+    //     /* Basic variants */
+    //     input.read(reinterpret_cast<char *>(&num_points_), sizeof(size_t));
+    //     input.read(reinterpret_cast<char *>(&degree_bound_), sizeof(size_t));
+    //     input.read(reinterpret_cast<char *>(&dim_), sizeof(size_t));
+    //     input.read(reinterpret_cast<char *>(&padded_dim_), sizeof(size_t));
+    //     input.read(reinterpret_cast<char *>(&entry_point_), sizeof(PID));
+    //     input.read(reinterpret_cast<char *>(&rotator_type_), sizeof(RotatorType));
+    //     input.read(reinterpret_cast<char *>(&metric_type_), sizeof(MetricType));
+
+    //     raw_dist_func_ = (metric_type_ == METRIC_IP) ? dot_product_dis<T> : euclidean_sqr<T>;
+
+    //     initialize();
+
+    //     /* Data */
+    //     data_.load(input);
+
+    //     /* Rotator */
+    //     this->rotator_->load(input);
+    //     if (rotator_->size() != padded_dim_)
+    //     {
+    //         std::cerr << "Bad padded_dim_ for rotator in QuantizedGraph<T>.load()\n";
+    //         exit(1);
+    //     }
+
+    //     input.close();
+    //     std::cout << "Quantized graph loaded!\n";
+    // }
 
     template <typename T>
     inline void QuantizedGraph<T>::set_ef(size_t cur_ef)
@@ -390,8 +537,8 @@ namespace rabitqlib::symqg
             QGBatchDataMap<T>::data_bytes(padded_dim_) * (degree_bound_ / fastscan::kBatchSize);
         this->row_offset_ = neighbor_offset_ + degree_bound_ * sizeof(PID);
 
-        data_ = Array<char, std::vector<size_t>, memory::AlignedAllocator<char, 1 << 22, true>>(
-            std::vector<size_t>{num_points_, row_offset_});
+        // Data is provided externally (copy or mmap). No allocation here.
+        // data_ptr_ should point to a buffer of size num_points_ * row_offset_.
 
         visited_list_pool_ = std::make_unique<VisitedListPool>(1, num_points_);
     }
