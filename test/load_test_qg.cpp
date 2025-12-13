@@ -15,6 +15,31 @@
 #include <cerrno>
 #include <cstring>
 
+static void drop_caches()
+{
+#ifdef __linux__
+    // Best-effort: drop page cache. Requires root; otherwise will fail gracefully.
+    ::sync();
+    int fd = ::open("/proc/sys/vm/drop_caches", O_WRONLY);
+    if (fd >= 0)
+    {
+        const char *val = "3\n";
+        ssize_t n = ::write(fd, val, std::strlen(val));
+        ::close(fd);
+        if (n < 0)
+        {
+            std::cerr << "drop_caches write failed: " << std::strerror(errno) << std::endl;
+        }
+    }
+    else
+    {
+        std::cerr << "drop_caches open failed: " << std::strerror(errno)
+                  << " (need root or proper permissions)" << std::endl;
+    }
+#else
+    // No-op on non-Linux
+#endif
+}
 // Minimal helpers inline in this file
 static void expect_eq(size_t a, size_t b)
 {
@@ -233,23 +258,46 @@ int main()
     std::cout << "ds: " << ds << std::endl;
 
     constexpr size_t racall_ats[] = {1, 5, 10, 20, 50, 100};
+    // constexpr size_t racall_ats[] = {1, 10};
+    // constexpr size_t K = 10;
     constexpr size_t K = 100;
     expect_eq(ds.ngt(), 100);
     std::vector<uint32_t> results(ds.ngt() * ds.nq());
-    for (size_t L :
-         {40, 60, 80, 100, 120, 140, 160, 180, 200})
+    auto search_all = [&](size_t L)
     {
         qg.set_ef(L);
         auto ts = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < ds.nq(); ++i)
             qg.search(ds.query(i), std::min(L, K), results.data() + i * K);
         auto te = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration<double>(te - ts).count();
-        auto qps = ds.nq() / duration;
-        std::cout << "L: " << L << ", qps: " << qps << std::endl;
+        auto duration_s = std::chrono::duration<double>(te - ts).count();
+        auto qps = ds.nq() / duration_s;
+        std::cout << "L: " << L << ", duration(s): " << duration_s << ", qps: " << qps << std::endl;
         auto recall = calc_recall(ds.nq(), ds.ngt(), ds.gts(), K, results.data(),
                                   std::size(racall_ats), racall_ats);
         std::cout << "recall: " << recall << std::endl;
+    };
+
+    auto search_one = [&](size_t L)
+    {
+        qg.set_ef(L);
+        std::vector<uint32_t> one_res(K);
+        auto ts = std::chrono::high_resolution_clock::now();
+        qg.search(ds.query(0), std::min(L, K), one_res.data());
+        auto te = std::chrono::high_resolution_clock::now();
+        auto duration_ms = std::chrono::duration<double, std::milli>(te - ts).count();
+        std::cout << "[search_one] L: " << L << ", duration(ms): " << duration_ms << std::endl;
+    };
+
+    for (size_t L : {40, 60, 80, 100, 120, 140, 160, 180, 200})
+    {
+        drop_caches();
+        search_one(L);
+    }
+
+    for (size_t L : {40, 60, 80, 100, 120, 140, 160, 180, 200})
+    {
+        search_all(L);
     }
 
     return 0;
