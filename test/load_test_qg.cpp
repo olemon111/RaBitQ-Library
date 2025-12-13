@@ -278,21 +278,29 @@ int main()
         std::cout << "recall: " << recall << std::endl;
     };
 
-    auto search_one = [&](size_t L)
+    auto search_one = [&](size_t L, size_t query_index)
     {
         qg.set_ef(L);
         std::vector<uint32_t> one_res(K);
         auto ts = std::chrono::high_resolution_clock::now();
-        qg.search(ds.query(0), std::min(L, K), one_res.data());
+        qg.search(ds.query(query_index), std::min(L, K), one_res.data());
         auto te = std::chrono::high_resolution_clock::now();
         auto duration_ms = std::chrono::duration<double, std::milli>(te - ts).count();
-        std::cout << "[search_one] L: " << L << ", duration(ms): " << duration_ms << std::endl;
+
+        // 计算单个 query 的 recall，gts 偏移到指定 query
+        const uint32_t *gt_row = ds.gts() + query_index * ds.ngt();
+        auto recall_one = calc_recall(1, ds.ngt(), gt_row, K, one_res.data(),
+                                      std::size(racall_ats), racall_ats);
+
+        std::cout << "[search_one] L: " << L << ", query=" << query_index
+                  << ", duration(ms): " << duration_ms
+                  << ", recall: " << recall_one << std::endl;
     };
 
-    for (size_t L : {40, 60, 80, 100, 120, 140, 160, 180, 200})
+    for (size_t L : {100, 120, 140, 160, 180, 200})
     {
         drop_caches();
-        search_one(L);
+        search_one(L, 0);
     }
 
     for (size_t L : {40, 60, 80, 100, 120, 140, 160, 180, 200})
