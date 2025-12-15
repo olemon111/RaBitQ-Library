@@ -108,9 +108,15 @@ print(f"[DEBUG] qg.hpp exists: {(Path(include_dir_str) / 'rabitqlib/index/symqg/
 # Compiler flags - explicitly add include directory
 compile_args = [
     f"-I{include_dir_str}",  # Explicitly add include directory
-    "-Wall", "-Ofast", "-Wextra", "-march=native", 
+    "-Wall", "-O1", "-Wextra",
+    # 使用保守的通用指令集，避免 Lambda 上非法指令
+    "-march=x86-64", "-mtune=generic",
     "-fpic", "-fopenmp", "-ftree-vectorize", "-fexceptions",
-    "-mavx2", "-mfma", "-mavx512f", "-mavx512dq", "-mavx512bw", "-mavx512vl",
+    "-mavx2", "-mfma",
+    # 显式禁用 AVX512，避免编译错误和运行时 SIGILL
+    "-mno-avx512f", "-mno-avx512cd", "-mno-avx512bw", "-mno-avx512dq", "-mno-avx512vl",
+    # 预处理器宏：阻止 Eigen 编译时激活 AVX512，并禁用激进内联
+    "-DEIGEN_DONT_ALIGN", "-DEIGEN_DONT_VECTORIZE", "-fno-inline-small-functions",
     "-std=c++17"
 ]
 
