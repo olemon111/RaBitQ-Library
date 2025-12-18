@@ -353,6 +353,19 @@ namespace rabitqlib::symqg
             exit(1);
         }
         data_ptr_ = reinterpret_cast<char *>(mapped);
+        // Hint kernel that we will perform random access to reduce read-ahead
+        {
+            int rv = posix_fadvise(data_fd_, 0, 0, POSIX_FADV_RANDOM);
+            if (rv != 0)
+            {
+                std::cerr << "posix_fadvise(POSIX_FADV_RANDOM) failed: " << std::strerror(rv) << '\n';
+            }
+            if (madvise(data_ptr_, data_len_, MADV_RANDOM) != 0)
+            {
+                std::perror("madvise(MADV_RANDOM) failed");
+            }
+            std::cout << "\tUsing mmap with random access advice for data file\n";
+        }
         data_mmap_ = true;
         data_malloc_owned_ = false;
 #else
