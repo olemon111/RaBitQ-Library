@@ -32,3 +32,10 @@ target_compile_options(load_test_qg PRIVATE -mavx2 -mfma -mavx512f -mavx512dq -m
 if (OpenMP_CXX_FOUND)
   target_link_libraries(load_test_qg PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+add_executable(load_test_qg_concurrently load_test_qg_concurrently.cpp)
+target_include_directories(load_test_qg_concurrently PRIVATE ${RABITQ_TEST_INCLUDES})
+target_compile_options(load_test_qg_concurrently PRIVATE -mavx2 -mfma -mavx512f -mavx512dq -mavx512bw -mavx512vl)
+if (OpenMP_CXX_FOUND)
+  target_link_libraries(load_test_qg_concurrently PRIVATE OpenMP::OpenMP_CXX)
+endif()
