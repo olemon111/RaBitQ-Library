@@ -6,11 +6,12 @@ from typing import Optional, Union
 
 try:
     from ._qg_core import QuantizedGraphCore
-except ImportError:
+except ImportError as e:
     raise ImportError(
-        "Failed to import _qg_core. Please ensure the package is properly built. "
-        "Run 'pip install -e .' or 'python setup.py build_ext --inplace'"
-    )
+        f"Failed to import _qg_core. Please ensure the package is properly built. "
+        f"Run 'pip install -e .' or 'python setup.py build_ext --inplace'. "
+        f"Original error: {e}"
+    ) from e
 
 
 class QG:
