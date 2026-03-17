@@ -223,12 +223,12 @@ private:
 int main()
 {
     Dataset ds(0, 1000000,
-               "/home/lbl/vdb-dataset/sift1m/sift1m_base.fbin",
-               "/home/lbl/vdb-dataset/sift1m/sift1m_query.fbin",
-               "/home/lbl/vdb-dataset/sift1m/sift1m_gt100");
+               "/mnt/efs/datasets/sift1m/sift1m_base.fbin",
+               "/mnt/efs/datasets/sift1m/sift1m_query.fbin",
+               "/mnt/efs/datasets/sift1m/sift1m_gt100");
     std::cout << "ds: " << ds << std::endl;
 
-    MMap diskann_mmap("/home/lbl/vdb-dataset/sift1m/diskann/memory_index/diskann_memory_index_sift1m_R32_L125");
+    MMap diskann_mmap("/mnt/efs/datasets/sift1m/diskann/memory_index/diskann_memory_index_sift1m_R32_L125");
     auto index_size_ptr = diskann_mmap.ptr<uint64_t>();
     auto max_od_ptr = (uint32_t *)(index_size_ptr + 1);
     auto ep_ptr = (uint32_t *)(max_od_ptr + 1);
